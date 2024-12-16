@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 # initialize flask app
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = 'mysql+mysqlconnector://root:xQClost.123@localhost/Ecommerce_API'
+app.config["SQLALCHEMY_DATABASE_URI"] = 'mysql+mysqlconnector://root:<dbpassword>@localhost/Ecommerce_API'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # base class 
@@ -246,32 +246,21 @@ def delete_product(id):
 @app.route('/orders', methods=["POST"])
 def create_order():
     try:
-        # Validate and deserialize the order_date (if included)
         order_data = order_schema.load(request.json)
     except ValidationError as e:
         return jsonify(e.messages), 400
 
-    # Get user_id directly from the request JSON
-    user_id = request.json.get("user_id")
-    if not user_id:
-        return jsonify({"message": "user_id is required"}), 400
-
-    # Retrieve the user using user_id
-    user = db.session.get(User, user_id)
+    # Retrieve user
+    user = db.session.get(User, order_data['user_id'])
     if not user:
-        return jsonify({"message": "User not found"}), 404
+        return jsonify({"message": "user not found"}), 404
 
-    # Create the new order
-    new_order = Order(user=user)
+    # Create a new order
+    new_order = Order(user=user)  # No need to handle order_date explicitly
     db.session.add(new_order)
     db.session.commit()
-
-    # Return the created order details
-    return jsonify({
-        "id": new_order.id,
-        "order_date": new_order.order_date.strftime("%Y-%m-%d %H:%M:%S"),
-        "user_id": new_order.user_id
-    }), 201
+    
+    return order_schema.jsonify(new_order), 201
 
     
 
