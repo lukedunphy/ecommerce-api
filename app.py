@@ -2,15 +2,23 @@
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
-from marshmallow import ValidationError
+from marshmallow import ValidationError, fields
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import ForeignKey, Integer, Table, String, Column, select, DateTime, Float
 from typing import List
 from datetime import datetime, timezone
+from sqlalchemy.exc import IntegrityError
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+db_password = os.getenv('DB_PASSWORD')
+print(f"Database Password: {db_password}")
 
 # initialize flask app
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = 'mysql+mysqlconnector://root:<dbpassword>@localhost/Ecommerce_API'
+app.config["SQLALCHEMY_DATABASE_URI"] = f'mysql+mysqlconnector://root:{db_password}@localhost/Ecommerce_API'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # base class 
@@ -30,8 +38,8 @@ ma = Marshmallow(app)
 order_product = Table(
     "order_product",
     Base.metadata,
-    Column("order_id", ForeignKey("orders.id")),
-    Column("product_id", ForeignKey("products.id"))
+    Column("order_id", ForeignKey("orders.id"),primary_key=True),
+    Column("product_id", ForeignKey("products.id"),primary_key=True)
 )
 
 # user table
@@ -53,11 +61,14 @@ class Order(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # use lambda function so line is called everytime a new row is created not just when column is defined
-    order_date: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # order_date = ma.auto_field(dump_only=True, default=lambda: datetime.now(timezone.utc))
+    order_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Original 
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
 
     # many-to-one
-    user: Mapped["User"] = relationship(back_populates="orders")
+    user: Mapped[List["User"]] = relationship(back_populates="orders")
 
     # one-to-many
     products: Mapped[List["Product"]] = relationship(secondary=order_product, back_populates="order_products")
@@ -86,6 +97,11 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
 class OrderSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Order
+
+    id = ma.auto_field(dump_only=True)
+    user_id = fields.Integer()
+    order_date = fields.DateTime()
+    # products = fields.List(fields.Nested(ProductSchema))
 
 
 class ProductSchema(ma.SQLAlchemyAutoSchema):
@@ -180,11 +196,11 @@ def create_product():
     except ValidationError as e:
         return jsonify(e.messages), 400
     
-    new_proudct = Product(product_name=product_data['product_name'], price=product_data['price'])
-    db.session.add(new_proudct)
+    new_product = Product(product_name=product_data['product_name'], price=product_data['price'])
+    db.session.add(new_product)
     db.session.commit()
 
-    return user_schema.jsonify(new_proudct), 201
+    return product_schema.jsonify(new_product), 201
 
 
 # retrieve all products
@@ -251,7 +267,8 @@ def create_order():
         return jsonify(e.messages), 400
 
     # Retrieve user
-    user = db.session.get(User, order_data['user_id'])
+    user_id = order_data['user_id']
+    user = db.session.get(User, user_id)
     if not user:
         return jsonify({"message": "user not found"}), 404
 
@@ -262,6 +279,76 @@ def create_order():
     
     return order_schema.jsonify(new_order), 201
 
+# add a product to an order
+@app.route('/orders/<int:order_id>/add_product/<int:product_id>', methods=["GET"])
+def add_product(order_id, product_id):
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "order not found"}), 404
+    
+    product = db.session.get(Product, product_id)
+
+    if not product:
+        return jsonify({"message": "product not found"}), 404
+    
+    try:
+        db.session.execute(
+            order_product.insert().values(order_id=order_id, product_id=product_id)
+        )
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"message": "product already exists in the order"}), 400
+    
+    return jsonify({"message": "product has been added to the order"}), 201
+
+
+# remove a proudct from an order
+@app.route('/orders/<int:order_id>/remove_product', methods=['Delete'])
+def remove_product(order_id):
+    product_id = request.json.get("product_id")
+    if not product_id:
+        return jsonify({"message": "missing product_id in request body"}), 400 
+    
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "order not found"}), 404
+    
+    # retrieve product
+    product = db.session.get(Product, product_id)
+    if not product:
+        return jsonify({"message": "product not found"}), 404
+    
+    if product not in order.products:
+        return jsonify({"message": "product is not in this order"}), 400
+    
+    order.products.remove(product)
+    db.session.commit()
+
+    return jsonify({"message": "product removed from the order"}), 200
+
+
+# get all orders for a user
+@app.route('/orders/user/<int:user_id>', methods=['GET'])
+def get_orders(user_id):
+    user = db.session.get(User, user_id)
+
+    if not user:
+        return jsonify({"message": "user not found"}), 404
+    
+    orders = user.orders
+    return jsonify(orders_schema.dump(orders)), 200
+
+
+# get all products for an order
+@app.route('/orders/<int:order_id>/products', methods=['GET'])
+def get_products_order(order_id):
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "order not found"}), 404
+    
+    products = order.products
+    return jsonify(products_schema.dump(products)), 200
     
 
 
@@ -271,6 +358,6 @@ if __name__ == "__main__":
         # creates all tables
         db.create_all()
         # if you need to drop all tables you can run:
-        #db.drop_all()
+        # db.drop_all()
 
     app.run(debug=True)
